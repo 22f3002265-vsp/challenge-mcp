@@ -1,9 +1,0 @@
-
-{
-  "rewrites": [
-    {
-      "source": "/mcp",
-      "destination": "/api/index"
-    }
-  ]
-}

@@ -1,6 +1,5 @@
 
 import hashlib
-import json
 import re
 
 from fastapi import FastAPI, Request
@@ -9,11 +8,10 @@ from fastapi.responses import JSONResponse, Response
 app = FastAPI()
 
 EMAIL = "22f3002265@ds.study.iitm.ac.in"
-TOOL_NAME = "solve_challenge"
 
 TOOL = {
-    "name": TOOL_NAME,
-    "description": "Compute the challenge response using the current HTTP request headers.",
+    "name": "solve_challenge",
+    "description": "Calculate the response for the current exam challenge.",
     "inputSchema": {
         "type": "object",
         "properties": {},
@@ -21,7 +19,7 @@ TOOL = {
 }
 
 
-def rpc_result(request_id, result):
+def rpc(request_id, result):
     return {
         "jsonrpc": "2.0",
         "id": request_id,
@@ -29,7 +27,7 @@ def rpc_result(request_id, result):
     }
 
 
-def rpc_error(request_id, code, message):
+def error(request_id, code, message):
     return {
         "jsonrpc": "2.0",
         "id": request_id,
@@ -37,119 +35,77 @@ def rpc_error(request_id, code, message):
     }
 
 
-async def handle_mcp(request: Request):
-    # Notifications have no JSON-RPC id and receive HTTP 202.
+@app.get("/")
+async def health():
+    return {"status": "ok"}
+
+
+@app.post("/mcp")
+async def mcp_endpoint(request: Request):
     try:
-        payload = await request.json()
+        body = await request.json()
     except Exception:
-        return JSONResponse(
-            rpc_error(None, -32700, "Parse error"),
-            status_code=400,
-        )
+        return JSONResponse(error(None, -32700, "Parse error"), status_code=400)
 
-    if not isinstance(payload, dict):
-        return JSONResponse(
-            rpc_error(None, -32600, "Invalid Request"),
-            status_code=400,
-        )
+    if not isinstance(body, dict) or body.get("jsonrpc") != "2.0":
+        return JSONResponse(error(None, -32600, "Invalid Request"), status_code=400)
 
-    method = payload.get("method")
-    request_id = payload.get("id")
-    params = payload.get("params") or {}
+    method = body.get("method")
+    request_id = body.get("id")
+    params = body.get("params") or {}
 
-    # MCP initialize handshake
     if method == "initialize":
-        result = {
-            "protocolVersion": params.get(
-                "protocolVersion", "2025-03-26"
-            ),
-            "capabilities": {
-                "tools": {"listChanged": False}
-            },
+        return JSONResponse(rpc(request_id, {
+            "protocolVersion": params.get("protocolVersion", "2025-03-26"),
+            "capabilities": {"tools": {}},
             "serverInfo": {
                 "name": "challenge-mcp",
                 "version": "1.0.0",
             },
-        }
-        return JSONResponse(rpc_result(request_id, result))
+        }))
 
-    # notifications/initialized and other notifications
     if method == "notifications/initialized":
         return Response(status_code=202)
 
     if method == "ping":
-        return JSONResponse(rpc_result(request_id, {}))
+        return JSONResponse(rpc(request_id, {}))
 
-    # Exactly one exposed tool
     if method == "tools/list":
-        return JSONResponse(
-            rpc_result(request_id, {"tools": [TOOL]})
-        )
+        return JSONResponse(rpc(request_id, {"tools": [TOOL]}))
 
     if method == "tools/call":
-        if not isinstance(params, dict):
+        if params.get("name") != "solve_challenge":
             return JSONResponse(
-                rpc_error(request_id, -32602, "Invalid params"),
+                error(request_id, -32602, "Unknown tool"),
                 status_code=400,
             )
 
-        if params.get("name") != TOOL_NAME:
-            return JSONResponse(
-                rpc_error(request_id, -32602, "Unknown tool"),
-                status_code=400,
-            )
-
-        # Read the challenge from THIS HTTP request's headers.
+        # Always use the challenge from the current HTTP request headers.
         challenge = request.headers.get("X-Exam-Challenge", "")
 
         if not re.fullmatch(r"[0-9a-f]{32}", challenge):
-            result = {
-                "content": [
-                    {
-                        "type": "text",
-                        "text": "Missing or invalid X-Exam-Challenge header",
-                    }
-                ],
+            return JSONResponse(rpc(request_id, {
+                "content": [{
+                    "type": "text",
+                    "text": "Missing or invalid X-Exam-Challenge header",
+                }],
                 "isError": True,
-            }
-            return JSONResponse(rpc_result(request_id, result))
+            }))
 
         normalized_email = EMAIL.strip().lower()
-        message = f"{challenge}:{normalized_email}"
-        answer = hashlib.sha256(
-            message.encode("utf-8")
+        digest = hashlib.sha256(
+            f"{challenge}:{normalized_email}".encode("utf-8")
         ).hexdigest()[:16]
 
-        result = {
-            "content": [
-                {"type": "text", "text": answer}
-            ],
+        return JSONResponse(rpc(request_id, {
+            "content": [{"type": "text", "text": digest}],
             "isError": False,
-        }
-        return JSONResponse(rpc_result(request_id, result))
+        }))
 
-    if method and method.startswith("notifications/"):
+    if isinstance(method, str) and method.startswith("notifications/"):
         return Response(status_code=202)
 
     return JSONResponse(
-        rpc_error(request_id, -32601, "Method not found"),
+        error(request_id, -32601, "Method not found"),
         status_code=400,
-    )
-
-
-# Vercel rewrites /mcp to this function.
-@app.post("/")
-@app.post("/mcp")
-async def mcp_endpoint(request: Request):
-    return await handle_mcp(request)
-
-
-@app.get("/")
-@app.get("/mcp")
-async def mcp_get():
-    # This minimal server uses POST for MCP JSON-RPC messages.
-    return JSONResponse(
-        {"error": "Use POST for MCP requests"},
-        status_code=405,
-        headers={"Allow": "POST"},
     )
